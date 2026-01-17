@@ -1,0 +1,67 @@
+FROM alpine:3.23.2 AS builder
+RUN apk update
+RUN apk add curl
+
+RUN curl \
+    --location \
+    --fail \
+    --show-error \
+    --remote-name \
+    https://gitlab.haskell.org/haskell-wasm/ghc-wasm-meta/-/raw/master/bootstrap.sh
+
+RUN apk add bash
+RUN apk add jq
+RUN apk add zstd
+RUN apk add make
+
+RUN sh -c '. bootstrap.sh'
+
+RUN ln -s /root/.ghc-wasm/wasm32-wasi-ghc/bin/wasm32-wasi-ghc /usr/local/bin/
+RUN ln -s /root/.ghc-wasm/cabal/bin/cabal /usr/local/bin/
+
+RUN which wasm32-wasi-ghc
+RUN which cabal
+
+RUN wasm32-wasi-ghc --version
+RUN cabal --version
+
+RUN cabal update --verbose=2
+
+RUN ln -s /root/.ghc-wasm/wasm32-wasi-ghc/bin/wasm32-wasi-ghc /usr/local/bin/ghc
+RUN ln -s /root/.ghc-wasm/wasm32-wasi-ghc/bin/wasm32-wasi-ghc-pkg /usr/local/bin/
+RUN ln -s /root/.ghc-wasm/wasm32-wasi-ghc/bin/wasm32-wasi-ghc-pkg /usr/local/bin/ghc-pkg
+
+WORKDIR /hs-fs-filter
+COPY --link ./hs-fs-filter.cabal ./
+RUN cabal update --verbose
+RUN apk add ghc
+RUN which hsc2hs
+RUN cabal \
+    build \
+    --only-dependencies
+COPY --link ./src/ ./src/
+COPY --link ./app/ ./app/
+RUN cabal \
+    build
+RUN cabal \
+    list-bin \
+    hs-fs-filter \
+    | fgrep -m 1 hs-fs-filter.wasm \
+    | while read line; do \
+        test -f "${line}" && cp -i "${line}" /usr/local/share/; \
+    done
+RUN ls -lh /usr/local/share/hs-fs-filter.wasm
+
+FROM golang:1.25.5-alpine3.23 AS demo
+RUN go install -v github.com/tetratelabs/wazero/cmd/wazero@v1.11.0
+COPY --from=builder /usr/local/share/hs-fs-filter.wasm /
+RUN mkdir -p demo && touch demo/file.txt
+RUN echo "--- Demo: finding files ---"
+RUN ls demo | wazero run --mount=. /hs-fs-filter.wasm -- --only-files
+RUN echo "--- Demo: finding dirs ---"
+RUN ls | wazero run --mount=. /hs-fs-filter.wasm -- --only-dirs
+
+FROM scratch
+COPY --from=builder /usr/local/share/hs-fs-filter.wasm /
+
+CMD ["/hs-fs-filter.wasm"]
